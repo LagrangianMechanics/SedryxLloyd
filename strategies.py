@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from PortfolioManager import Portfolio
 
 
-def mean_reversion_strat(ticker, portfolio: Portfolio):
+def mean_reversion_strat(ticker, start, end, portfolio: Portfolio):
     data = yf.download(ticker, start="1900-01-01")
 
     # 200-day moving average
@@ -33,7 +33,7 @@ def mean_reversion_strat(ticker, portfolio: Portfolio):
 
     row_index = 0
 
-    for index, row in data.iterrows():
+    for date, price in portfolio.trade(start, end):
         close_price = row['Close'][ticker]
         bb_lower = row['BB_upper'][""]
         bb_upper = row['BB_lower'][""]
