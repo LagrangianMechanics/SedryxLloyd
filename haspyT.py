@@ -1,5 +1,8 @@
 import typing as ty
 
+#This whole file exists just so I can use Haskell-like type annotations in my Python code
+#I know am oppsessed with Haskell, its an addiction at this point 😂!
+
 class Type:
     def __init__(self, out):
         self.out = out
