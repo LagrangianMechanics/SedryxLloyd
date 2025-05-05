@@ -73,8 +73,10 @@ def date_input(date, default: Maybe[DateRange] = None):
             return (x, y)
 
 class Trade:
-    def __init__(self, portfolio):
+    def __init__(self, portfolio, methods = None):
         self.portfolio = portfolio
+
+        self.methods = methods or [Stats.avalue]
     def __call__(self, *date, freq = 'D'):
         date = date_input(date, default = self.portfolio._adate_range)
         
@@ -97,13 +99,15 @@ class Trade:
         stream = Stream(prices)
         tStart, tEnd = prices.index[0], prices.index[-1]
         pre = tStart
-        self.portfolio.holdings.loc[tStart] = [0] * len(self.portfolio.assets)
+        self.portfolio.holdings.loc[tStart] = [self.portfolio.cash] + [0] * len(self.portfolio.assets)
         self.portfolio.portfolio_performance.loc[tStart] = [0] * len(self.portfolio.assets)
         u = Stream(self.portfolio.portfolio_performance, True)
+        print(self.portfolio.holdings)
         for date in prices.index:
             self.portfolio.holdings.loc[date] = self.portfolio.holdings.loc[pre]
+            print('Try', self.portfolio.holdings.loc[date, self.portfolio.assets[0] :] )
             
-            self.portfolio.portfolio_performance.loc[date] = self.portfolio.holdings.loc[date] * self.portfolio.asset_prices.loc[date]
+            self.portfolio.portfolio_performance.loc[date] = self.portfolio.holdings.loc[date, self.portfolio.assets[0] :] * self.portfolio.asset_prices.loc[date]
             u.next()
             
             self.portfolio._date = date
@@ -115,38 +119,117 @@ class Trade:
         self.portfolio._date = None
 
 class Portfolio:
-    def __init__(self, assets: List[Str, ...], source = None):
+    '''
+    A financial portfolio tracking time-evolving holdings, cash, trades, and performance.
+
+    The Portfolio class manages asset holdings, cash balance, portfolio valuation, 
+    and trade execution. It also provides an intuitive `trade()` method that 
+    allows strategy logic to be written inside a `for` loop.
+    '''
+    def __init__(self, assets: List[Str, ...], source: Tuple[RawDate, RawDate, Tuple[Str, ...], Str] >> Table = None):
         self.cash: Float = 0
         self.assets: Tuple[Str, ...] = tuple(assets)
 
-        self.source: Tuple[RawDate, RawDate, Tuple[Str, ...], Str] >> Table = source or yfinanceSource
+        # Asset data sources
+        self.source = source or yfinanceSource
 
+        # Date ranges
         self._adate_range: Maybe[DateRange] = None
         self._tdate_range: Maybe[DateRange] = None
         self._pdate_range: Maybe[DateRange] = None
-        self._date: Maybe[RawDate] = None
+        self._date: Maybe[RawDate] = None  # When not None, indicates an active trading session.
+                                   # Represents the current date of the session in progress.
+                                   # This is the primary flag for session state.
 
-        self.holdings: Table = pd.DataFrame(columns = self.assets)
-        self.asset_prices: Maybe[Table] = None
-        self.portfolio_performance: Maybe[Table] = pd.DataFrame(columns = self.assets)
+        # Tables
+        self.holdings: Table = pd.DataFrame(columns=('Cash', *self.assets))  
+        # Number of units(shares) held at each time step, including cash.
 
+        self.asset_prices: Maybe[Table] = None  
+        # Asset prices indexed by time. Must align with holdings for performance computation.
+
+        self.portfolio_performance: Maybe[Table] = pd.DataFrame(columns=self.assets)  
+        # Monetary value of assets (excluding cash) in the portfolio at each time step.
+
+        #Namespaces
         self.stats = Stats(self)
+        #Statistical methods and indicators related to portfolio performance.
+
+        #Other
         self.trade = Trade(self)
+
+    # Priviate Methods
+    def _update_cash(self, delta: Float):
+        '''
+        Update the cash balance by `delta`. If a trading session is active the
+        holdings table is also updated.
+        '''
+        self.cash += delta
+
+        if self._date != None:
+            #If in the middle of a trading session update the holdings table
+            self.holdings.loc[self._date, 'Cash'] += delta
+    def _update_holdings(self, asset: Str, delta_shares: Float):
+        '''
+        Update the holdings and performance tables for a given asset at the current date.
+
+        Notes
+        -----
+        Assumes an active trading session (self._date is not None).
+        No input validation is performed. Use with caution.
+        '''
+        self.holdings.loc[self._date, asset] += delta_shares
+        self.portfolio_performance.loc[self._date, asset] = self.holdings.loc[self._date, asset] * self.asset_prices.loc[self._date, asset]
+    
+    # Public Methods
+    def load_prices(self, start: Date, end: Date, freq: Str = 'D'):
+        '''
+        Preload asset price data into the portfolio.
+
+        Parameters
+        ----------
+        start : Date
+            The start date for the data request.
+        end : Date
+            The end date for the data request.
+        freq : str, default 'D'
+            Data frequency (e.g. 'D' for daily, 'H' for hourly).
+
+        Raises
+        ------
+        PortfolioError
+            If called during an active trading session.
+        ValueError
+            If `start` is after `end`.
+        '''
+
+        if self._date != None:
+            raise PortfolioError('Cannot load new price data during an active trading session.')
+
+        start_date = pd.to_datetime(start)
+        end_date = pd.to_datetime(end)
+
+        if start_date > end_date:
+            raise ValueError("Invalid date range — the start date must come before the end date.")
+
+        # Fetch price data from the configured source
+        self.asset_prices = self.source(start_date, end_date, self.assets, freq)
+
+        # Cache the actual date range returned.
+        dates = self.asset_prices.index
+        self._adate_range = (dates[0], datas[-1])
     def deposit(self, amount: Float):
         if amount < 0:
             raise ValueError('Deposits must be positive.')
+        
         self._update_cash(amount)
     def withdraw(self, amount: Float):
         if amount < 0:
             raise ValueError('Withdrawals must be positive.')
         if amount > self.cash:
             raise InsufficientFundsError('Insufficient funds for withdrawal.')
+        
         self._update_cash(-amount)
-    def _update_cash(self, delta: Float):
-        self.cash += delta
-    def _update_holdings(self, asset: Str, delta_shares: Float):
-        self.holdings.loc[self._date, asset] += delta_shares
-        self.portfolio_performance.loc[self._date, asset] = self.holdings.loc[self._date, asset] * self.asset_prices.loc[self._date, asset]
     def buy(self, asset: Str, amount: Float):
         if asset not in self.assets:
             raise ValueError(f'Asset \'{asset}\' not in portfolio. Please add it first using the \'add_asset()\' method.')
@@ -175,21 +258,10 @@ class Portfolio:
 
         self._update_cash(amount)
         self._update_holdings(asset, -shares)
-    def load_prices(self, start: Date, end: Date, freq: str = 'D'):
-        start_date = pd.to_datetime(start)
-        end_date = pd.to_datetime(end)
-
-        if start_date > end_date:
-            raise ValueError("Invalid date range — the start date must come before the end date.")
-
-        self.asset_prices = self.source(start_date, end_date, self.assets, freq)
-
-        self._adate_range = (start_date, end_date)
 
 class Stats:
     def __init__(self, portfolio: Portfolio):
         self.portfolio = portfolio
-
     def add(func):
         ak = lambda f: lambda self, *args, **kwargs: self._asset_func(self, f, *args, **kwargs)
         pk = lambda f: lambda self, *args, **kwargs: self._portfolio_func(self, f, *args, **kwargs)
@@ -198,7 +270,10 @@ class Stats:
         setattr(Stats, f'p{func.__name__}', pk(func))
         
         return func
-    
+    def append(func):
+        g = lambda f: lambda self, *args, **kwargs: f(self.portfolio, *args, **kwargs)
+        setattr(Stats, func.__name__, g(func))
+        return func
     @staticmethod
     def _asset_func(self, func, *args, **kwargs):
         if self.portfolio._date == None:
@@ -236,3 +311,8 @@ def mean(table):
 @Stats.add
 def logreturns(table):
     return np.log(table) - np.log(table.shift(1))
+
+@Stats.append
+def weights(p):
+    v = p.stats.pvalue()
+    return v
